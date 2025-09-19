@@ -1,0 +1,5 @@
+PassengerAppType node
+PassengerStartupFile app.js
+PassengerAppEnv production
+PassengerFriendlyErrorPages off
+PassengerNodejs /usr/bin/node

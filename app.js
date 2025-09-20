@@ -43,19 +43,70 @@ app.use(
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // ------- OAuth -------
-app.get("/auth/login", (req, res) => {
-  if (!YAHOO_CLIENT_ID || !YAHOO_CLIENT_SECRET || !YAHOO_REDIRECT_URI) {
-    return res.status(500).send("Missing Yahoo env vars");
+app.get("/auth/callback", async (req, res) => {
+  try {
+    const { code, error, error_description } = req.query;
+    if (error) {
+      console.error("[callback] Yahoo error:", error, error_description);
+      return res.status(400).send(`Yahoo error: ${error} - ${error_description}`);
+    }
+    if (!code) {
+      console.error("[callback] Missing ?code");
+      return res.status(400).send("Missing code");
+    }
+
+    const { YAHOO_CLIENT_ID, YAHOO_CLIENT_SECRET, YAHOO_REDIRECT_URI, APP_ORIGIN } = process.env;
+    if (!YAHOO_CLIENT_ID || !YAHOO_CLIENT_SECRET || !YAHOO_REDIRECT_URI) {
+      console.error("[callback] Missing env", {
+        hasId: !!YAHOO_CLIENT_ID, hasSecret: !!YAHOO_CLIENT_SECRET, hasRedirect: !!YAHOO_REDIRECT_URI
+      });
+      return res.status(500).send("Server misconfigured: missing Yahoo env vars");
+    }
+
+    const auth = Buffer.from(`${YAHOO_CLIENT_ID}:${YAHOO_CLIENT_SECRET}`).toString("base64");
+    const body = new URLSearchParams();
+    body.set("grant_type", "authorization_code");
+    body.set("redirect_uri", YAHOO_REDIRECT_URI);
+    body.set("code", code);
+
+    console.log("[callback] exchanging code…");
+    const tokenResp = await fetch("https://api.login.yahoo.com/oauth2/get_token", {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${auth}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+    });
+
+    const text = await tokenResp.text();
+    let tok;
+    try { tok = JSON.parse(text); } catch { tok = { raw: text }; }
+
+    console.log("[callback] token status", tokenResp.status);
+    if (!tokenResp.ok) {
+      console.error("[callback] token error body:", tok);
+      return res.status(502).send(`Token exchange failed: ${tokenResp.status}`);
+    }
+
+    // Expecting JSON with access_token / refresh_token
+    if (!tok.access_token) {
+      console.error("[callback] no access_token in body:", tok);
+      return res.status(502).send("Token exchange returned no access_token");
+    }
+
+    req.session.token = tok.access_token;
+    req.session.refresh_token = tok.refresh_token;
+    req.session.token_exp = Math.floor(Date.now() / 1000) + (tok.expires_in || 3500);
+
+    console.log("[callback] token ok, redirecting to app");
+    return res.redirect(APP_ORIGIN || "/");
+  } catch (e) {
+    console.error("[callback] exception:", e);
+    return res.status(502).send("Auth callback exception");
   }
-  const params = new URLSearchParams({
-    client_id: YAHOO_CLIENT_ID,
-    redirect_uri: YAHOO_REDIRECT_URI,
-    response_type: "code",
-    language: "en-us",
-    scope: "fspt-r openid profile",
-  });
-  res.redirect(`${OAUTH_AUTHORIZE}?${params.toString()}`);
 });
+
 
 app.get("/auth/callback", async (req, res) => {
   try {

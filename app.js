@@ -1,112 +1,58 @@
-// CommonJS server for Render
+// app.js (CommonJS) — Known-good minimal API for Render
 const express = require("express");
 const session = require("cookie-session");
 const cors = require("cors");
-const fetch = require("node-fetch"); // v2 for CJS
-require("dotenv").config();
+const fetch = require("node-fetch"); // v2
+if (process.env.NODE_ENV !== "production") { require("dotenv").config(); }
 
 const app = express();
-app.set("trust proxy", 1); // Render uses reverse proxy
+app.set("trust proxy", 1);
 
-// --- Config from env ---
+// --- ENV ---
 const {
   YAHOO_CLIENT_ID,
   YAHOO_CLIENT_SECRET,
-  YAHOO_REDIRECT_URI, // e.g. https://<service>.onrender.com/auth/callback
+  YAHOO_REDIRECT_URI,          // e.g. https://yahoo-next-matchup-api.onrender.com/auth/callback
+  APP_ORIGIN,                  // e.g. https://lab.vanillabeansolutions.com/yahoo-next-match/
   SESSION_SECRET,
-  APP_ORIGIN, // e.g. https://app.vanillabeansolutions.com
-  PORT = 10000, // Render provides PORT
+  PORT = process.env.PORT || 10000,
 } = process.env;
+
+// --- MIDDLEWARE ---
+app.use(express.json());
+app.use(session({
+  name: "yahoo_sess",
+  secret: SESSION_SECRET || "changeme",
+  httpOnly: true,
+  sameSite: "lax",
+  secure: true, // Render = HTTPS
+}));
+app.use(cors({
+  origin: [APP_ORIGIN],
+  credentials: true,
+}));
+
+// --- ROUTES ---
+app.get("/", (_req, res) => res.send("Yahoo Next Matchup API is running"));
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
 const OAUTH_AUTHORIZE = "https://api.login.yahoo.com/oauth2/request_auth";
 const OAUTH_TOKEN = "https://api.login.yahoo.com/oauth2/get_token";
 const FANTASY_API = "https://fantasysports.yahooapis.com/fantasy/v2";
 
-app.use(express.json());
-app.use(
-  session({
-    name: "yahoo_sess",
-    secret: SESSION_SECRET || "change_me",
-    httpOnly: true,
-    sameSite: "lax",
-    secure: true, // HTTPS on Render
-  })
-);
-
-app.use(
-  cors({
-    origin: [APP_ORIGIN],
-    credentials: true,
-  })
-);
-
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
-// ------- OAuth -------
-app.get("/auth/callback", async (req, res) => {
-  try {
-    const { code, error, error_description } = req.query;
-    if (error) {
-      console.error("[callback] Yahoo error:", error, error_description);
-      return res.status(400).send(`Yahoo error: ${error} - ${error_description}`);
-    }
-    if (!code) {
-      console.error("[callback] Missing ?code");
-      return res.status(400).send("Missing code");
-    }
-
-    const { YAHOO_CLIENT_ID, YAHOO_CLIENT_SECRET, YAHOO_REDIRECT_URI, APP_ORIGIN } = process.env;
-    if (!YAHOO_CLIENT_ID || !YAHOO_CLIENT_SECRET || !YAHOO_REDIRECT_URI) {
-      console.error("[callback] Missing env", {
-        hasId: !!YAHOO_CLIENT_ID, hasSecret: !!YAHOO_CLIENT_SECRET, hasRedirect: !!YAHOO_REDIRECT_URI
-      });
-      return res.status(500).send("Server misconfigured: missing Yahoo env vars");
-    }
-
-    const auth = Buffer.from(`${YAHOO_CLIENT_ID}:${YAHOO_CLIENT_SECRET}`).toString("base64");
-    const body = new URLSearchParams();
-    body.set("grant_type", "authorization_code");
-    body.set("redirect_uri", YAHOO_REDIRECT_URI);
-    body.set("code", code);
-
-    console.log("[callback] exchanging code…");
-    const tokenResp = await fetch("https://api.login.yahoo.com/oauth2/get_token", {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${auth}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body,
-    });
-
-    const text = await tokenResp.text();
-    let tok;
-    try { tok = JSON.parse(text); } catch { tok = { raw: text }; }
-
-    console.log("[callback] token status", tokenResp.status);
-    if (!tokenResp.ok) {
-      console.error("[callback] token error body:", tok);
-      return res.status(502).send(`Token exchange failed: ${tokenResp.status}`);
-    }
-
-    // Expecting JSON with access_token / refresh_token
-    if (!tok.access_token) {
-      console.error("[callback] no access_token in body:", tok);
-      return res.status(502).send("Token exchange returned no access_token");
-    }
-
-    req.session.token = tok.access_token;
-    req.session.refresh_token = tok.refresh_token;
-    req.session.token_exp = Math.floor(Date.now() / 1000) + (tok.expires_in || 3500);
-
-    console.log("[callback] token ok, redirecting to app");
-    return res.redirect(APP_ORIGIN || "/");
-  } catch (e) {
-    console.error("[callback] exception:", e);
-    return res.status(502).send("Auth callback exception");
+app.get("/auth/login", (req, res) => {
+  if (!YAHOO_CLIENT_ID || !YAHOO_CLIENT_SECRET || !YAHOO_REDIRECT_URI) {
+    return res.status(500).send("Server misconfigured: missing Yahoo env vars");
   }
+  const params = new URLSearchParams({
+    client_id: YAHOO_CLIENT_ID,
+    redirect_uri: YAHOO_REDIRECT_URI,
+    response_type: "code",
+    language: "en-us",
+    scope: "fspt-r openid profile",
+  });
+  res.redirect(`${OAUTH_AUTHORIZE}?${params.toString()}`);
 });
-
 
 app.get("/auth/callback", async (req, res) => {
   try {
@@ -128,18 +74,22 @@ app.get("/auth/callback", async (req, res) => {
       },
       body,
     });
-    const tok = await tokenResp.json();
-    if (!tokenResp.ok) return res.status(500).send(`Token exchange failed: ${tokenResp.status}`);
+
+    const text = await tokenResp.text();
+    let tok; try { tok = JSON.parse(text); } catch { tok = { raw: text }; }
+    if (!tokenResp.ok || !tok.access_token) {
+      console.error("[callback] token error", tokenResp.status, tok);
+      return res.status(502).send(`Token exchange failed: ${tokenResp.status}`);
+    }
 
     req.session.token = tok.access_token;
     req.session.refresh_token = tok.refresh_token;
     req.session.token_exp = Math.floor(Date.now() / 1000) + (tok.expires_in || 3500);
 
-    // back to your React app on DreamHost
     return res.redirect(APP_ORIGIN || "/");
   } catch (e) {
-    console.error("callback err", e);
-    return res.status(500).send("Auth callback exception");
+    console.error("[callback] exception:", e);
+    return res.status(502).send("Auth callback exception");
   }
 });
 
@@ -163,12 +113,8 @@ const getByName = (arr, name) =>
   Array.isArray(arr) ? (arr.find(x => Array.isArray(x) && x[0]?.name === name)?.[0]?.value) : undefined;
 
 app.get("/api/me", authed, async (req, res) => {
-  try {
-    const j = await yFetch(req.session, "/users;use_login=1");
-    res.json(j);
-  } catch {
-    res.status(500).json({ error: "me_failed" });
-  }
+  try { res.json(await yFetch(req.session, "/users;use_login=1")); }
+  catch { res.status(500).json({ error: "me_failed" }); }
 });
 
 app.get("/api/next-matchup", authed, async (req, res) => {
@@ -211,9 +157,7 @@ app.get("/api/next-matchup", authed, async (req, res) => {
             opponent: aKey === team_key ? getByName(ts?.[1], "name") : getByName(ts?.[0], "name"),
             week_start: getByName(m, "week_start"),
             week_end: getByName(m, "week_end"),
-            team_name,
-            team_key,
-            league_key,
+            team_name, team_key, league_key,
           };
         }
       }
@@ -221,15 +165,10 @@ app.get("/api/next-matchup", authed, async (req, res) => {
     };
 
     let next = null;
-    for (let w = current_week; w < current_week + 4; w++) {
-      next = await findWeek(w);
-      if (next) break;
-    }
+    for (let w = current_week; w < current_week + 4; w++) { next = await findWeek(w); if (next) break; }
     if (!next) return res.status(404).json({ error: "no_upcoming_matchup" });
     res.json(next);
-  } catch {
-    res.status(500).json({ error: "matchup_failed" });
-  }
+  } catch { res.status(500).json({ error: "matchup_failed" }); }
 });
 
 app.listen(PORT, () => console.log(`API listening on :${PORT}`));

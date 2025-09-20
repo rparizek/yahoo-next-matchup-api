@@ -36,6 +36,21 @@ app.use(cors({
 app.get("/", (_req, res) => res.send("Yahoo Next Matchup API is running"));
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
+app.get("/_env-check", (_req, res) => {
+  const id = process.env.YAHOO_CLIENT_ID || "";
+  const sec = process.env.YAHOO_CLIENT_SECRET || "";
+  res.json({
+    hasId: !!id,
+    idLen: id.length,
+    idSample: id ? `${id.slice(0,4)}...${id.slice(-4)}` : null,
+    hasSecret: !!sec,
+    secretLen: sec.length,
+    hasRedirect: !!process.env.YAHOO_REDIRECT_URI,
+    redirect: process.env.YAHOO_REDIRECT_URI || null
+  });
+});
+
+
 const OAUTH_AUTHORIZE = "https://api.login.yahoo.com/oauth2/request_auth";
 const OAUTH_TOKEN = "https://api.login.yahoo.com/oauth2/get_token";
 const FANTASY_API = "https://fantasysports.yahooapis.com/fantasy/v2";
